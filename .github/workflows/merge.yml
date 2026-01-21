@@ -1,0 +1,93 @@
+name: Auto Merge IPTV Sources
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # 每6小时自动运行一次
+  workflow_dispatch:       # 支持手动触发
+  push:
+    paths:
+      - 'sources.json'    # 当配置文件修改时也触发
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '16'
+        
+    - name: Merge IPTV sources
+      run: |
+        # 创建合并脚本
+        cat > merge.js << 'EOF'
+        const https = require('https');
+        const fs = require('fs');
+        
+        // 两个原始源
+        const sources = [
+          'https://cdn.jsdelivr.net/gh/cyh92/iptv-api-cctv@master/output/ipv6/result.m3u',
+          'https://cdn.jsdelivr.net/gh/cyh92/iptv-api-weishi@master/output/ipv6/result.m3u'
+        ];
+        
+        async function fetchSource(url) {
+          return new Promise((resolve, reject) => {
+            https.get(url, (res) => {
+              let data = '';
+              res.on('data', (chunk) => data += chunk);
+              res.on('end', () => resolve(data));
+            }).on('error', reject);
+          });
+        }
+        
+        async function main() {
+          let merged = '#EXTM3U\n';
+          merged += '# 自动合并时间: ' + new Date().toLocaleString() + '\n\n';
+          
+          for (let i = 0; i < sources.length; i++) {
+            try {
+              console.log('正在获取源:', sources[i]);
+              const content = await fetchSource(sources[i]);
+              
+              // 移除EXTM3U头部
+              let processed = content;
+              if (processed.startsWith('#EXTM3U')) {
+                processed = processed.substring(processed.indexOf('\n') + 1);
+              }
+              
+              merged += processed.trim() + '\n\n';
+              console.log('获取成功');
+              
+            } catch (error) {
+              console.error('获取失败:', error.message);
+            }
+          }
+          
+          // 保存文件
+          fs.writeFileSync('merged.m3u', merged);
+          console.log('合并完成，保存为 merged.m3u');
+        }
+        
+        main().catch(console.error);
+        EOF
+        
+        # 运行合并脚本
+        node merge.js
+        
+    - name: Commit merged file
+      run: |
+        git config --local user.email "github-actions[bot]@users.noreply.github.com"
+        git config --local user.name "github-actions[bot]"
+        
+        # 检查文件是否有变化
+        if git diff --quiet; then
+          echo "没有变化，跳过提交"
+        else
+          git add merged.m3u
+          git commit -m "🤖 Auto merge: $(date '+%Y-%m-%d %H:%M')"
+          git push
+        fi
