@@ -1,93 +1,92 @@
-name: Auto Merge IPTV Sources
+name: Merge IPTV Sources
 
 on:
+  workflow_dispatch:
   schedule:
-    - cron: '0 */6 * * *'  # 每6小时自动运行一次
-  workflow_dispatch:       # 支持手动触发
-  push:
-    paths:
-      - 'sources.json'    # 当配置文件修改时也触发
+    - cron: '0 */6 * * *'
 
 jobs:
   merge:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     
     steps:
     - name: Checkout repository
       uses: actions/checkout@v3
-      
-    - name: Setup Node.js
-      uses: actions/setup-node@v3
       with:
-        node-version: '16'
-        
-    - name: Merge IPTV sources
+        token: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Setup curl
       run: |
-        # 创建合并脚本
-        cat > merge.js << 'EOF'
-        const https = require('https');
-        const fs = require('fs');
+        # 确保curl可用
+        which curl || apt-get update && apt-get install -y curl
+    
+    - name: Download CCTV source
+      run: |
+        echo "正在下载央视源..."
+        curl -s -L "https://cdn.jsdelivr.net/gh/cyh92/iptv-api-cctv@master/output/ipv6/result.m3u" \
+          -o cctv.m3u || echo "央视源下载失败"
         
-        // 两个原始源
-        const sources = [
-          'https://cdn.jsdelivr.net/gh/cyh92/iptv-api-cctv@master/output/ipv6/result.m3u',
-          'https://cdn.jsdelivr.net/gh/cyh92/iptv-api-weishi@master/output/ipv6/result.m3u'
-        ];
+        # 检查文件
+        if [ -f cctv.m3u ]; then
+          echo "央视源大小: $(wc -l < cctv.m3u) 行"
+        else
+          echo "央视源文件不存在"
+        fi
+    
+    - name: Download Weishi source
+      run: |
+        echo "正在下载卫视源..."
+        curl -s -L "https://cdn.jsdelivr.net/gh/cyh92/iptv-api-weishi@master/output/ipv6/result.m3u" \
+          -o weishi.m3u || echo "卫视源下载失败"
         
-        async function fetchSource(url) {
-          return new Promise((resolve, reject) => {
-            https.get(url, (res) => {
-              let data = '';
-              res.on('data', (chunk) => data += chunk);
-              res.on('end', () => resolve(data));
-            }).on('error', reject);
-          });
-        }
+        if [ -f weishi.m3u ]; then
+          echo "卫视源大小: $(wc -l < weishi.m3u) 行"
+        else
+          echo "卫视源文件不存在"
+        fi
+    
+    - name: Merge files
+      run: |
+        echo "开始合并..."
+        echo "#EXTM3U" > merged.m3u
+        echo "# 自动合并时间: $(date '+%Y-%m-%d %H:%M:%S')" >> merged.m3u
+        echo "" >> merged.m3u
         
-        async function main() {
-          let merged = '#EXTM3U\n';
-          merged += '# 自动合并时间: ' + new Date().toLocaleString() + '\n\n';
-          
-          for (let i = 0; i < sources.length; i++) {
-            try {
-              console.log('正在获取源:', sources[i]);
-              const content = await fetchSource(sources[i]);
-              
-              // 移除EXTM3U头部
-              let processed = content;
-              if (processed.startsWith('#EXTM3U')) {
-                processed = processed.substring(processed.indexOf('\n') + 1);
-              }
-              
-              merged += processed.trim() + '\n\n';
-              console.log('获取成功');
-              
-            } catch (error) {
-              console.error('获取失败:', error.message);
-            }
-          }
-          
-          // 保存文件
-          fs.writeFileSync('merged.m3u', merged);
-          console.log('合并完成，保存为 merged.m3u');
-        }
+        # 合并央视（跳过第一行）
+        if [ -f cctv.m3u ]; then
+          echo "# 央视频道" >> merged.m3u
+          tail -n +2 cctv.m3u >> merged.m3u
+          echo "" >> merged.m3u
+        fi
         
-        main().catch(console.error);
-        EOF
+        # 合并卫视（跳过第一行）
+        if [ -f weishi.m3u ]; then
+          echo "# 卫视频道" >> merged.m3u
+          tail -n +2 weishi.m3u >> merged.m3u
+        fi
         
-        # 运行合并脚本
-        node merge.js
+        echo "合并完成，文件大小: $(wc -l < merged.m3u) 行"
         
+        # 显示前5行
+        echo "前5行内容:"
+        head -5 merged.m3u
+    
     - name: Commit merged file
       run: |
-        git config --local user.email "github-actions[bot]@users.noreply.github.com"
-        git config --local user.name "github-actions[bot]"
+        echo "检查文件是否存在..."
+        ls -la *.m3u
         
-        # 检查文件是否有变化
-        if git diff --quiet; then
-          echo "没有变化，跳过提交"
-        else
+        if [ -f merged.m3u ]; then
+          echo "提交文件..."
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
           git add merged.m3u
-          git commit -m "🤖 Auto merge: $(date '+%Y-%m-%d %H:%M')"
+          git status
+          git commit -m "🤖 Auto merge: $(date '+%Y-%m-%d %H:%M')" || echo "没有变化"
           git push
+        else
+          echo "错误: merged.m3u 文件不存在"
+          exit 1
         fi
